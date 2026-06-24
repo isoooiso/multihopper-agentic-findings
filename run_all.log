@@ -1,0 +1,196 @@
+MultiHopper agentic-flow findings — combined PoC run @ 2026-06-24T20:39:23.767780+00:00
+Each PoC is deterministic; exit code 0 means the finding reproduced.
+
+
+####################################################################################
+# Finding #1 — create is not restart-safe (duplicate transfers/funding)
+#   (poc_create_idempotency.py)
+####################################################################################
+ * Serving Flask app 'mock_multihopper'
+ * Debug mode: off
+20:39:24  poc    MultiHopper agentic flow — restart-safety PoC
+20:39:24  poc    Mock implements the documented contract: Idempotency-Key caching + externalId de-dup (MH_033).
+20:39:24  poc    
+20:39:24  poc    ================================================================================
+20:39:24  poc    SCENARIO A — documented reference agent (random key, no externalId)
+20:39:24  poc    --------------------------------------------------------------------------------
+20:39:24  poc    RUN 1: agent starts the transfer, funds the keeper, then CRASHES
+20:39:24  mock   CREATE  NEW transfer id=1001  key=3b473d63-3..  externalId=None  intent=(Awa1..->Bwa1.. amountRaw=100000000)
+20:39:24  agent  [REF] create -> transfer id=1001
+20:39:24  mock   FUND    keeper funded for transfer id=1001   (funding event #1)
+20:39:24  agent  [REF] funded keeper for transfer id=1001
+20:39:24  agent  [REF] *** simulated process crash (before route completion) ***
+20:39:24  poc    RUN 2: SAME intent — the agent process restarts from the top
+20:39:24  mock   CREATE  NEW transfer id=1002  key=85197093-7..  externalId=None  intent=(Awa1..->Bwa1.. amountRaw=100000000)
+20:39:24  agent  [REF] create -> transfer id=1002
+20:39:24  mock   FUND    keeper funded for transfer id=1002   (funding event #2)
+20:39:24  agent  [REF] funded keeper for transfer id=1002
+20:39:24  poc    --------------------------------------------------------------------------------
+20:39:24  poc    RESULT: distinct transfers created for ONE intent = 2  ids=[1001, 1002]
+20:39:24  poc    RESULT: keeper funding events                     = 2  on ids=[1001, 1002]
+20:39:24  poc    
+20:39:24  poc    ================================================================================
+20:39:24  poc    SCENARIO B — proposed fix (stable Idempotency-Key + externalId)
+20:39:24  poc    --------------------------------------------------------------------------------
+20:39:24  poc    RUN 1: agent starts the transfer, funds the keeper, then CRASHES
+20:39:24  mock   CREATE  NEW transfer id=1001  key=idem_creat..  externalId=ext_e273a1750b829b09  intent=(Awa1..->Bwa1.. amountRaw=100000000)
+20:39:24  agent  [FIX] create -> transfer id=1001
+20:39:24  mock   FUND    keeper funded for transfer id=1001   (funding event #1)
+20:39:24  agent  [FIX] funded keeper for transfer id=1001
+20:39:24  agent  [FIX] *** simulated process crash (before route completion) ***
+20:39:24  poc    RUN 2: SAME intent — the agent process restarts from the top
+20:39:24  mock   CREATE  idem-cache HIT  key=idem_creat..  -> id=1001 (NO new transfer created)
+20:39:24  agent  [FIX] create -> transfer id=1001
+20:39:24  mock   FUND    keeper re-fund ignored for id=1001 (already funded)
+20:39:24  agent  [FIX] funded keeper for transfer id=1001
+20:39:24  poc    --------------------------------------------------------------------------------
+20:39:24  poc    RESULT: distinct transfers created for ONE intent = 1  ids=[1001]
+20:39:24  poc    RESULT: keeper funding events                     = 1  on ids=[1001]
+20:39:24  poc    
+20:39:24  poc    ================================================================================
+20:39:24  poc    SUMMARY
+20:39:24  poc      documented reference : 2 transfers / 2 keeper fundings for 1 intent  ->  DUPLICATE FUND MOVEMENT
+20:39:24  poc      with proposed fix    : 1 transfer  / 1 keeper funding  for 1 intent  ->  safe
+20:39:24  poc    ================================================================================
+
+[exit code 0 -> REPRODUCED]
+
+####################################################################################
+# Finding #2 — confirm-broadcast keeper double-funding race
+#   (poc_02_funding_race.py)
+####################################################################################
+ * Serving Flask app 'poc_02_funding_race'
+ * Debug mode: off
+20:39:24  MultiHopper finding #2 — keeper double-funding race PoC
+20:39:24  
+20:39:24  ================================================================================
+20:39:24  SCENARIO A — documented client + server (record sig AFTER confirmation)
+20:39:24  --------------------------------------------------------------------------------
+20:39:24  RUN 1: fund keeper, then CRASH during the confirmation poll
+20:39:24    [server] /prepare id=2001: keeper NOT confirmed and no usable record -> EMIT NEW keeperFundingTx
+20:39:24    [client] broadcast keeperFundingTx sig=kSigAAAA1111.. (in-flight)
+20:39:24    [client] *** process crash during confirmation poll ***
+20:39:24          (the in-flight funding tx is NOT yet confirmed at resume time)
+20:39:24  RUN 2: resume the SAME transfer id (call /prepare again)
+20:39:24    [server] /prepare id=2001: keeper NOT confirmed and no usable record -> EMIT NEW keeperFundingTx
+20:39:24    [client] broadcast keeperFundingTx sig=kSigBBBB2222.. (in-flight)
+20:39:24    [server] confirm-broadcast id=2001: recorded keeper sig kSigBBBB2222..
+20:39:24  --------------------------------------------------------------------------------
+20:39:24  RESULT: keeper funding txs that landed for ONE transfer = 2  (DOUBLE-FUNDED)
+20:39:24  
+20:39:24  ================================================================================
+20:39:24  SCENARIO B — proposed fix (record sig BEFORE confirmation + server honors it)
+20:39:24  --------------------------------------------------------------------------------
+20:39:24  RUN 1: fund keeper, then CRASH during the confirmation poll
+20:39:24    [server] /prepare id=2001: keeper NOT confirmed and no usable record -> EMIT NEW keeperFundingTx
+20:39:24    [client] broadcast keeperFundingTx sig=kSigAAAA1111.. (in-flight)
+20:39:24    [server] confirm-broadcast id=2001: recorded keeper sig kSigAAAA1111..
+20:39:24    [client] *** process crash during confirmation poll ***
+20:39:24          (the in-flight funding tx is NOT yet confirmed at resume time)
+20:39:24  RUN 2: resume the SAME transfer id (call /prepare again)
+20:39:24    [server] /prepare id=2001: recorded keeper signature present & tx in-flight -> keeperFundingTx=null (no re-fund)
+20:39:24    [client] keeperFundingTx is null -> nothing to fund
+20:39:24  --------------------------------------------------------------------------------
+20:39:24  RESULT: keeper funding txs that landed for ONE transfer = 1  (safe)
+20:39:24  
+20:39:24  ================================================================================
+20:39:24  SUMMARY
+20:39:24    documented flow : 2 keeper fundings for 1 transfer  ->  DOUBLE FUNDING on crash+resume
+20:39:24    with fix        : 1 keeper funding  for 1 transfer  ->  safe
+20:39:24  ================================================================================
+
+[exit code 0 -> REPRODUCED]
+
+####################################################################################
+# Finding #3 — single-blockhash budget exhaustion
+#   (poc_03_blockhash_budget.py)
+####################################################################################
+MultiHopper finding #3 — single-blockhash budget vs prescribed broadcast waits
+One /prepare -> one blockhash (lifetime ~60s) must cover ALL four groups.
+
+### Documented worst case — keeper confirm within its own 60s poll
+    per-confirm latency: keeper=55s route=10s orch=10s session=10s | n_route=2 n_session=1
+    group                broadcast @ t   blockhash status
+    keeperFundingTx              0.0s   valid
+    routeInitTxs[0]             55.0s   valid
+    routeInitTxs[1]             65.0s   EXPIRED — tx rejected (BlockhashNotFound)
+    orchestratorInitTx          78.0s   EXPIRED — tx rejected (BlockhashNotFound)
+    sessionInitTxs[0]           91.0s   EXPIRED — tx rejected (BlockhashNotFound)
+    total elapsed before final group broadcast: 91.0s (blockhash lifetime 60s)
+    => 'routeInitTxs[1]' onward broadcast against an EXPIRED blockhash -> forced into the resume path
+
+### Realistic devnet latencies
+    per-confirm latency: keeper=20s route=15s orch=15s session=15s | n_route=3 n_session=2
+    group                broadcast @ t   blockhash status
+    keeperFundingTx              0.0s   valid
+    routeInitTxs[0]             20.0s   valid
+    routeInitTxs[1]             35.0s   valid
+    routeInitTxs[2]             50.0s   valid
+    orchestratorInitTx          68.0s   EXPIRED — tx rejected (BlockhashNotFound)
+    sessionInitTxs[0]           86.0s   EXPIRED — tx rejected (BlockhashNotFound)
+    sessionInitTxs[1]          101.0s   EXPIRED — tx rejected (BlockhashNotFound)
+    total elapsed before final group broadcast: 101.0s (blockhash lifetime 60s)
+    => 'orchestratorInitTx' onward broadcast against an EXPIRED blockhash -> forced into the resume path
+
+### Optimistic — fast confirmations everywhere
+    per-confirm latency: keeper=8s route=8s orch=8s session=8s | n_route=3 n_session=2
+    group                broadcast @ t   blockhash status
+    keeperFundingTx              0.0s   valid
+    routeInitTxs[0]              8.0s   valid
+    routeInitTxs[1]             16.0s   valid
+    routeInitTxs[2]             24.0s   valid
+    orchestratorInitTx          35.0s   valid
+    sessionInitTxs[0]           46.0s   valid
+    sessionInitTxs[1]           54.0s   valid
+    total elapsed before final group broadcast: 54.0s (blockhash lifetime 60s)
+    => fits within one blockhash
+
+==============================================================================
+CONCLUSION
+  A single shared blockhash cannot reliably cover the prescribed
+  'confirm each group before the next + 3s delays' procedure. Under the
+  documented keeper poll alone (up to 60s) the route group can already be
+  expired; under realistic devnet latency the happy path is regularly
+  blown, making the resume path the norm rather than the exception.
+==============================================================================
+
+[exit code 0 -> REPRODUCED]
+
+####################################################################################
+# Finding #4 — preparedTxs.resume.* is undocumented
+#   (poc_04_resume_undocumented.py)
+####################################################################################
+MultiHopper finding #4 — `resume` is read by the reference code but undocumented
+
+preparedTxs fields READ by the documented reference loop:
+    preparedTxs.resume.nothingToDo
+    preparedTxs.resume.routeAlreadyDeployed
+
+preparedTxs fields DEFINED by the documentation:
+    preparedTxs.keeperFundingTx
+    preparedTxs.lastValidBlockHeight
+    preparedTxs.orchestratorInitTx
+    preparedTxs.recentBlockhash
+    preparedTxs.routeInitTxs
+    preparedTxs.sessionInitTxs
+
+UNDOCUMENTED fields the reference code depends on:
+    preparedTxs.resume.nothingToDo    <-- not in any documented schema
+    preparedTxs.resume.routeAlreadyDeployed    <-- not in any documented schema
+
+Impact: loop termination in the reference 'Full autonomous loop' branches on
+`preparedTxs.resume?.nothingToDo` and `?.routeAlreadyDeployed`. With `resume`
+undocumented, an agent generating its own client cannot know these exist and
+its termination logic diverges from the reference (premature exit, or looping
+until the attempt cap throws despite the transfer having progressed).
+
+[exit code 0 -> REPRODUCED]
+
+====================================================================================
+COMBINED SUMMARY
+  [PASS]  Finding #1 — create is not restart-safe (duplicate transfers/funding)
+  [PASS]  Finding #2 — confirm-broadcast keeper double-funding race
+  [PASS]  Finding #3 — single-blockhash budget exhaustion
+  [PASS]  Finding #4 — preparedTxs.resume.* is undocumented
+  4/4 findings reproduced
+====================================================================================
